@@ -1,3 +1,2 @@
 # DocuMind
 
-chatbot
