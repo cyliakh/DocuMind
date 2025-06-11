@@ -12,6 +12,63 @@ from langchain.docstore import InMemoryDocstore
 from langchain.schema import Document
 from langchain.embeddings.base import Embeddings
 
+# === Style ===
+st.markdown("""
+    <style>
+        body, .stApp {
+            background-color: #ffffff !important;
+        }
+        .message-user {
+            background-color: #fff0f5;
+            padding: 10px;
+            border-radius: 12px;
+            margin: 8px 0;
+            display: flex;
+            align-items: center;
+        }
+        .message-assistant {
+            background-color: #f0e6ff;
+            padding: 10px;
+            border-radius: 12px;
+            margin: 8px 0;
+            display: flex;
+            align-items: center;
+        }
+        .avatar {
+            width: 32px;
+            height: 32px;
+            margin-right: 10px;
+        }
+        .message-content {
+            flex: 1;
+        }
+        .stTextInput > div > div > input {
+            background-color: #fff0f5;
+        }
+        .stButton button {
+            background-color: #ff99cc;
+            color: white;
+        }
+        section[data-testid="stSidebar"] {
+            background-color: #ffe6f0 !important;
+            color: #d63384;
+        }
+        .stFileUploader {
+            background-color: #fff0f5;
+            border: 1px dashed #ff66a3;
+            padding: 10px;
+            border-radius: 12px;
+            margin-top: 10px;
+        }
+        h1 {
+            text-align: center;
+            color: #d63384;
+            font-size: 2.5rem;
+            padding: 20px;
+        }
+    </style>
+""", unsafe_allow_html=True)
+
 OLLAMA_HOST = "http://34.68.20.35:11434"
 MODEL_NAME = "mixtral"
 EMBEDDING_MODEL = "mxbai-embed-large"
@@ -19,9 +76,40 @@ EMBEDDING_MODEL = "mxbai-embed-large"
 CACHE_DIR = "embedding_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-st.title("Chat with LLaMA 3 & Multi-PDF Uploader")
+st.markdown("<h1 style='color: #d94484;'>DocuMind: AI Assistant</h1>", unsafe_allow_html=True)
+
+@st.cache_resource
+def warm_up_models():
+    try:
+        # Warm-up embedding model
+        embed_resp = requests.post(
+            f"{OLLAMA_HOST}/api/embed",
+            json={"model": EMBEDDING_MODEL, "input": ["warmup"]},
+            timeout=1000,
+        )
+        embed_resp.raise_for_status()
+
+        # Warm-up chat model
+        chat_resp = requests.post(
+            f"{OLLAMA_HOST}/api/chat",
+            json={
+                "model": MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Say hello."}
+                ]
+            },
+            timeout=1000,
+        )
+        chat_resp.raise_for_status()
+    except Exception as e:
+        st.warning(f"Warm-up failed: {e}")
+
+warm_up_models()
+
 st.sidebar.header("Settings")
 
+# Initialize session state variables
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -37,7 +125,9 @@ if "selected_pdfs" not in st.session_state:
 def submit_input():
     st.session_state.pending_user_input = st.session_state["chat_input"]
 
-uploaded_files = st.file_uploader("Upload PDFs", accept_multiple_files=True, type=["pdf"])
+with st.sidebar:
+    st.markdown("<h3 style='color: #d63384;'>Upload your PDFs</h3>", unsafe_allow_html=True)
+    uploaded_files = st.file_uploader(" ", accept_multiple_files=True, type=["pdf"])
 
 def file_hash(file_bytes):
     return hashlib.md5(file_bytes).hexdigest()
@@ -76,24 +166,26 @@ class DummyEmbeddings(Embeddings):
 
 dummy_embed = DummyEmbeddings()
 
-# Process uploaded PDFs and add a checkbox to include/exclude them
+# Process uploaded PDFs and checkbox to include/exclude
 if uploaded_files:
     for pdf_file in uploaded_files:
         pdf_bytes = pdf_file.read()
         h = file_hash(pdf_bytes)
-        cache_path = os.path.join(CACHE_DIR, f"{h}.faiss")
+        # Use directory cache path for FAISS index, not a single file
+        cache_path = os.path.join(CACHE_DIR, h)
 
-        # Checkbox to select PDFs
-        is_selected = st.checkbox(f"Include: {pdf_file.name}", key=f"select_{pdf_file.name}")
+        # Checkbox inside sidebar for PDF selection, default True if first time
+        is_selected = st.sidebar.checkbox(f"Include: {pdf_file.name}", key=f"select_{pdf_file.name}",
+                                          value=st.session_state.selected_pdfs.get(pdf_file.name, True))
         st.session_state.selected_pdfs[pdf_file.name] = is_selected
 
         if pdf_file.name not in st.session_state.retrievers:
             if os.path.exists(cache_path):
-                st.write(f"Loading cached FAISS index for {pdf_file.name}")
+                st.sidebar.write(f"Loading cached FAISS index for {pdf_file.name}")
                 faiss_index = FAISS.load_local(cache_path, dummy_embed)
                 st.session_state.retrievers[pdf_file.name] = faiss_index
             else:
-                st.write(f"Processing and embedding {pdf_file.name}...")
+                st.sidebar.write(f"Processing and embedding {pdf_file.name}...")
 
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
                     tmp_file.write(pdf_bytes)
@@ -111,7 +203,7 @@ if uploaded_files:
                 index = faiss.IndexFlatL2(dim)
                 index.add(embedding_vectors)
 
-                # Add filename metadata so we can refer to which doc the text is from
+                # Add filename metadata for source
                 docs = [
                     Document(
                         page_content=doc.page_content,
@@ -133,14 +225,40 @@ if uploaded_files:
 
                 os.remove(tmp_path)
 
+# Display chat messages with avatars and style
 for msg in st.session_state.messages:
-    st.markdown(f"**{msg['role'].capitalize()}:** {msg['content']}")
+    role = msg["role"]
+    content = msg["content"]
+
+    if role == "user":
+        avatar_url = "https://cdn-icons-png.flaticon.com/512/6997/6997662.png"  # cute user icon
+        css_class = "message-user"
+    else:
+        avatar_url = "https://cdn-icons-png.flaticon.com/512/4712/4712037.png"  # cute robot icon
+        css_class = "message-assistant"
+
+    st.markdown(f"""
+        <div class="{css_class}">
+            <img src="{avatar_url}" class="avatar" />
+            <div class="message-content">{content}</div>
+        </div>
+    """, unsafe_allow_html=True)
 
 st.text_input("You:", key="chat_input", on_change=submit_input)
 
 if st.session_state.pending_user_input:
     user_msg = st.session_state.pending_user_input
     st.session_state.messages.append({"role": "user", "content": user_msg})
+    st.markdown(f"""
+        <div class="message-user">
+            <img src="https://cdn-icons-png.flaticon.com/512/6997/6997662.png" class="avatar" />
+            <div class="message-content">{user_msg}</div>
+        </div>
+        <div class="message-assistant">
+            <img src="https://cdn-icons-png.flaticon.com/512/4712/4712037.png" class="avatar" />
+            <div class="message-content"><em>.......</em> 🤖</div>
+        </div>
+    """, unsafe_allow_html=True)
 
     reply = ""
     placeholder = st.empty()
@@ -202,10 +320,14 @@ if st.session_state.pending_user_input:
             ) as response:
                 for line in response.iter_lines():
                     if line:
-                        data = json.loads(line.decode("utf-8"))
-                        delta = data.get("message", {}).get("content", "")
-                        reply += delta
-                        placeholder.markdown(f"**Assistant:** {reply}")
+                        try:
+                            data = json.loads(line.decode("utf-8"))
+                            delta = data.get("message", {}).get("content", "")
+                            reply += delta
+                            placeholder.markdown(f"**Assistant:** {reply}")
+                        except Exception:
+                            # Ignore malformed line
+                            continue
 
         else:
             # No PDFs selected, normal chat
@@ -221,10 +343,13 @@ if st.session_state.pending_user_input:
             ) as response:
                 for line in response.iter_lines():
                     if line:
-                        data = json.loads(line.decode("utf-8"))
-                        delta = data.get("message", {}).get("content", "")
-                        reply += delta
-                        placeholder.markdown(f"**Assistant:** {reply}")
+                        try:
+                            data = json.loads(line.decode("utf-8"))
+                            delta = data.get("message", {}).get("content", "")
+                            reply += delta
+                            placeholder.markdown(f"**Assistant:** {reply}")
+                        except Exception:
+                            continue
 
     except Exception as e:
         reply = f"Error: {e}"
